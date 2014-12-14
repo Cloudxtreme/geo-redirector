@@ -1,4 +1,14 @@
+map $arg_video_uri $cr_classic {
+    default 1;
+    ""      0;
+}
+map $cr_classic $balance_factor {
+    0       $uri;
+    1       $arg_video_uri;
+}
+
 lua_shared_dict disabled_nodes 1m;
+limit_req_zone $balance_factor zone=rr:300m rate=25r/m;
 init_by_lua '
     yaml = require "lyaml"
     local file = "/etc/nginx/redro.yaml"
@@ -7,12 +17,16 @@ init_by_lua '
     cfg = yaml.load(f:read("*all"))
     cluster_total = {}
     cluster_keys = {}
+    checklist = {}
+    nodenames = {}
     for cluster, nodes in pairs(cfg["clusters"]) do
         cluster_total[cluster] = 0
         cluster_keys[cluster] = 0
         for address, attribs in pairs(nodes) do
             cluster_total[cluster] = cluster_total[cluster] + attribs["weight"]
             cluster_keys[cluster] = cluster_keys[cluster] + 1
+            table.insert(checklist, { "/query_one", { vars = {qhost = address, quri = cfg["check_uri"]}}})
+            table.insert(nodenames, address)
         end
         ngx.log(ngx.INFO, ("cluster %s: total weight=%s"):format( cluster, cluster_total[cluster] ))
     end
@@ -55,6 +69,32 @@ init_by_lua '
         return result
     end
 
+    function balance_req(seed, nodes, disabled_nodes)
+        local nv = node_vector(seed, nodes)
+        for k, v in pairs(nv) do
+            if disabled_nodes:get(v) == null then
+                if ngx.var.cr_classic == "0" then
+                    return ngx.redirect(("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.request_uri, ngx.HTTP_MOVED_TEMPORARILY))
+                else
+                    return ngx.redirect(("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.arg_video_uri, ngx.HTTP_MOVED_TEMPORARILY))
+                end
+            end
+        end
+    end
+
+    function query_http()
+        local resps = { ngx.location.capture_multi(checklist) }
+        local disabled = ngx.shared.disabled_nodes
+        for i, resp in ipairs(resps) do
+            if resp.status ~= ngx.HTTP_OK then
+                disabled:add(nodenames[i],1)
+                ngx.log(ngx.WARN, "node is down: ", nodenames[i], " response=", tostring(resp.status))
+            else
+                disabled:delete(nodenames[i])
+                ngx.log(ngx.DEBUG, "node is alive: ", nodenames[i])
+            end
+        end
+    end
 ';
 
 geo $dest_group {
@@ -85,7 +125,7 @@ server {
     server_name  distribution.tvigle.ru video.tvigle.ru;
 
     access_log  /var/log/nginx/distribution.access.log custom buffer=128k; 
-    error_log  /var/log/nginx/distribution.error.log; 
+    error_log  /var/log/nginx/distribution.error.log debug; 
     log_not_found off;
     
     location = /favicon.ico { return 404; }    
@@ -96,16 +136,38 @@ server {
     }
 
     location / {
-        default_type 'text/plain';
-        rewrite_by_lua '
-            local nv = node_vector(md5_last48bits(ngx.var.uri), cfg["clusters"][ngx.var.dest_group])
-            local disabled_nodes = ngx.shared.disabled_nodes
+        error_page 418 @wrr_balance;
+        limit_req zone=rr nodelay;
+        limit_req_status 418;
+        add_header "X-BF" $balance_factor;
+        content_by_lua '
+            return balance_req(md5_last48bits(ngx.var.balance_factor), cfg["clusters"][ngx.var.dest_group], ngx.shared.disabled_nodes)
+        ';
+    }
+    location @wrr_balance {
+        add_header "X-WRR" true;
+        add_header "X-BF" $balance_factor;
+        content_by_lua '
+            return balance_req(math.random(256^6-1), cfg["clusters"][ngx.var.dest_group], ngx.shared.disabled_nodes)
+        ';
+    }
 
-            for k, v in pairs(nv) do
-                if disabled_nodes:get(v) == null then
-                    return ngx.redirect(("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.request_uri, ngx.HTTP_MOVED_TEMPORARILY))
-                end
+    location = /check {
+        default_type text/plain;
+        set $qhost "";
+        set $quri "";
+        content_by_lua '
+            query_http()
+            for _, v in ipairs(ngx.shared.disabled_nodes:get_keys()) do
+                ngx.say( ("Disabled: %s"):format(v) )
             end
         ';
     }
+
+	location = /query_one {
+            proxy_connect_timeout   1000ms;
+            proxy_read_timeout      1000ms;    
+            rewrite ^ $quri break;
+            proxy_pass http://$qhost;
+        }
 }
