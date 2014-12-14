@@ -178,6 +178,17 @@ server {
         ';
     }
 
+    location = /get_blocked {
+        default_type text/plain;
+        set $qhost "";
+        set $quri "";
+        content_by_lua '
+            for _, v in ipairs(ngx.shared.disabled_nodes:get_keys()) do
+                ngx.say( ("Disabled: %s"):format(v) )
+            end
+        ';
+    }
+
 	location = /query_one {
             proxy_ignore_client_abort on;
             proxy_connect_timeout   1000ms;
