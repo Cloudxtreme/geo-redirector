@@ -74,10 +74,13 @@ init_by_lua '
         for k, v in pairs(nv) do
             if disabled_nodes:get(v) == null then
                 if ngx.var.cr_classic == "0" then
-                    return ngx.redirect(("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.request_uri, ngx.HTTP_MOVED_TEMPORARILY))
+                    ngx.status = ngx.HTTP_MOVED_TEMPORARILY
+                    ngx.header["Location"] = ("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.request_uri)
                 else
-                    return ngx.redirect(("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.arg_video_uri, ngx.HTTP_MOVED_TEMPORARILY))
+                    ngx.status = ngx.HTTP_OK
+                    ngx.print(v)
                 end
+                ngx.eof()
             end
         end
     end
@@ -85,6 +88,7 @@ init_by_lua '
     function query_http()
         local resps = { ngx.location.capture_multi(checklist) }
         local disabled = ngx.shared.disabled_nodes
+        disabled:set("sentinel_run_at", ngx.time())
         for i, resp in ipairs(resps) do
             if resp.status ~= ngx.HTTP_OK then
                 disabled:add(nodenames[i],1)
@@ -120,12 +124,13 @@ server {
     listen 443 ssl;
     ssl_certificate /etc/nginx/ssl/tvigle_ru_2016_02_26.crt;
     ssl_certificate_key /etc/nginx/ssl/pk2014.key;
+    lua_use_default_type off;
 
     include /etc/nginx/conf.d/antiseo.conf;
     server_name  distribution.tvigle.ru video.tvigle.ru;
 
     access_log  /var/log/nginx/distribution.access.log custom buffer=128k; 
-    error_log  /var/log/nginx/distribution.error.log debug; 
+    error_log  /var/log/nginx/distribution.error.log; 
     log_not_found off;
     
     location = /favicon.ico { return 404; }    
@@ -136,23 +141,32 @@ server {
     }
 
     location / {
-        error_page 418 @wrr_balance;
+        error_page 418 = @wrr_balance;
         limit_req zone=rr nodelay;
         limit_req_status 418;
-        add_header "X-BF" $balance_factor;
         content_by_lua '
-            return balance_req(md5_last48bits(ngx.var.balance_factor), cfg["clusters"][ngx.var.dest_group], ngx.shared.disabled_nodes)
+            local disabled = ngx.shared.disabled_nodes
+            balance_req(md5_last48bits(ngx.var.balance_factor), cfg["clusters"][ngx.var.dest_group], disabled)
+
+            local last_run = disabled:get("sentinel_run_at")
+            if last_run == nil or (ngx.time() - last_run) > cfg["check_interval"] then
+                query_http()
+            end
         ';
     }
     location @wrr_balance {
-        add_header "X-WRR" true;
-        add_header "X-BF" $balance_factor;
         content_by_lua '
-            return balance_req(math.random(256^6-1), cfg["clusters"][ngx.var.dest_group], ngx.shared.disabled_nodes)
+            local disabled = ngx.shared.disabled_nodes
+            balance_req(math.random(256^6-1), cfg["clusters"][ngx.var.dest_group], disabled)
+
+            local last_run = disabled:get("sentinel_run_at")
+            if last_run == nil or (ngx.time() - last_run) > cfg["check_interval"] then
+                query_http()
+            end
         ';
     }
 
-    location = /check {
+    location = /force_check {
         default_type text/plain;
         set $qhost "";
         set $quri "";
@@ -165,6 +179,7 @@ server {
     }
 
 	location = /query_one {
+            proxy_ignore_client_abort on;
             proxy_connect_timeout   1000ms;
             proxy_read_timeout      1000ms;    
             rewrite ^ $quri break;
