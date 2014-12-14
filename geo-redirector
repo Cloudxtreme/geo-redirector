@@ -1,0 +1,111 @@
+lua_shared_dict disabled_nodes 1m;
+init_by_lua '
+    yaml = require "lyaml"
+    local file = "/etc/nginx/redro.yaml"
+    local f, err = io.open(file, "r")
+    if not f then return nil, err end
+    cfg = yaml.load(f:read("*all"))
+    cluster_total = {}
+    cluster_keys = {}
+    for cluster, nodes in pairs(cfg["clusters"]) do
+        cluster_total[cluster] = 0
+        cluster_keys[cluster] = 0
+        for address, attribs in pairs(nodes) do
+            cluster_total[cluster] = cluster_total[cluster] + attribs["weight"]
+            cluster_keys[cluster] = cluster_keys[cluster] + 1
+        end
+        ngx.log(ngx.INFO, ("cluster %s: total weight=%s"):format( cluster, cluster_total[cluster] ))
+    end
+
+    function md5_last48bits(data)
+        local binhash = ngx.md5_bin(data)
+        local hash = 0
+        for i=11, 16 do hash = 256 * hash + binhash:byte(i) end
+        return hash
+    end
+
+    function node_vector(seed, nodes)
+        local result = {}
+        local used = {}
+        local len = 0
+        local tw = 0
+        for address, attribs in pairs(nodes) do
+            tw = tw + attribs["weight"]
+            len = len + 1
+        end
+
+        local cs = seed
+        for i=1, len do
+            local rem = math.fmod(cs, tw)
+            cs = math.floor(cs / tw)
+            for address, attribs in pairs(nodes) do
+                if used[address] == nil then
+                    if rem < attribs["weight"] then
+                        table.insert(result, address)
+                        used[address] = true
+                        break
+                    end
+                    rem = rem - attribs["weight"]
+                end
+            end
+
+            tw = tw - nodes[result[#result]]["weight"]
+        end
+
+        return result
+    end
+
+';
+
+geo $dest_group {
+    default             main;
+    100.64.0.0/10       ufa;
+    136.169.128.0/17    ufa;
+    145.255.0.0/19      ufa;
+    46.191.128.0/17     ufa;
+    77.79.128.0/18      ufa;
+    79.140.16.0/20      ufa;
+    81.30.176.0/20      ufa;
+    81.30.192.0/19      ufa;
+    84.39.240.0/20      ufa;
+    89.189.128.0/18     ufa;
+    92.50.128.0/17      ufa;
+    94.41.0.0/16        ufa;
+    95.105.0.0/17       ufa;
+}
+
+server {
+    listen 80;
+    listen 8123;
+    listen 443 ssl;
+    ssl_certificate /etc/nginx/ssl/tvigle_ru_2016_02_26.crt;
+    ssl_certificate_key /etc/nginx/ssl/pk2014.key;
+
+    include /etc/nginx/conf.d/antiseo.conf;
+    server_name  distribution.tvigle.ru video.tvigle.ru;
+
+    access_log  /var/log/nginx/distribution.access.log custom buffer=128k; 
+    error_log  /var/log/nginx/distribution.error.log; 
+    log_not_found off;
+    
+    location = /favicon.ico { return 404; }    
+
+    location = /crossdomain.xml {
+        root /var/www/tvigo.ru;
+        access_log off;
+    }
+
+    location / {
+        default_type 'text/plain';
+        rewrite_by_lua '
+            local nv = node_vector(md5_last48bits(ngx.var.uri), cfg["clusters"][ngx.var.dest_group])
+            local disabled_nodes = ngx.shared.disabled_nodes
+
+            for k, v in pairs(nv) do
+                if disabled_nodes:get(v) == null then
+                    return ngx.redirect(("%s://%s%s"):format(ngx.var.scheme, v, ngx.var.request_uri, ngx.HTTP_MOVED_TEMPORARILY))
+                end
+            end
+        ';
+    }
+}

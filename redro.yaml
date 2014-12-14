@@ -1,0 +1,56 @@
+balancing_threshold: 25
+combinatoric_replacements: 3
+
+check_interval: 60
+check_uri: '/crossdomain.xml'
+check_timeout: 1
+
+clusters:
+  main:
+    62.183.82.239:80:
+      weight: 8
+      name: nal-1
+  
+  #  79.142.100.31:80:
+  #    weight: 20
+  #    name: cache5
+  #
+  #  79.142.100.32:80:
+  #    weight: 50
+  #    name: cache6
+  # 
+  #  79.142.100.33:80:
+  #    weight: 50
+  #    name: cache7
+  
+    212.12.13.133:80:
+      weight: 80
+      name: tula-1
+  
+    78.37.112.134:80:
+      weight: 80
+      name: arch-1
+  
+    88.215.131.51:80:
+      weight: 100
+      name: stav-1
+  
+    178.45.252.114:80:
+      weight: 80
+      name: sam-1
+  
+  #  79.142.100.34:80:
+  #    weight: 50
+  #    name: cache8
+  #
+  #  79.142.100.35:80:
+  #    weight: 50
+  #    name: cache9
+  #
+  #  79.142.100.37:80:
+  #    weight: 50
+  #    name: cache10
+  ufa:
+    77.79.161.130:80:
+      weight: 100
+      name: ufanet
