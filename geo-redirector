@@ -90,7 +90,7 @@ init_by_lua '
         local disabled = ngx.shared.disabled_nodes
         disabled:set("sentinel_run_at", ngx.time())
         for i, resp in ipairs(resps) do
-            if resp.status ~= ngx.HTTP_OK then
+            if resp.status >= 500 and resp.status <= 599 then
                 disabled:add(nodenames[i],1)
                 ngx.log(ngx.WARN, "node is down: ", nodenames[i], " response=", tostring(resp.status))
             else
