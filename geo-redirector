@@ -120,6 +120,7 @@ geo $dest_group {
 
 server {
     listen 80;
+    listen 8100;
     listen 8123;
     listen 443 ssl;
     ssl_certificate /etc/nginx/ssl/tvigle_ru_2016_02_26.crt;
